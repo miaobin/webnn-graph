@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebNN Text Encoder Demo</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      max-width: 900px;
+      margin: 50px auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .container {
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    h1 {
+      color: #333;
+      padding-bottom: 10px;
+    }
+    .status {
+      padding: 15px;
+      margin: 15px 0;
+      border-radius: 5px;
+      font-weight: 500;
+    }
+    .status.loading {
+      background: #fff3cd;
+      border-left: 4px solid #ffc107;
+    }
+    .status.success {
+      background: #d4edda;
+      border-left: 4px solid #28a745;
+    }
+    .status.error {
+      background: #f8d7da;
+      border-left: 4px solid #dc3545;
+    }
+    .info {
+      background: #e7f3ff;
+      padding: 15px;
+      border-left: 4px solid #2196F3;
+      margin: 15px 0;
+      border-radius: 5px;
+    }
+    .debug-section {
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 5px;
+      margin-top: 20px;
+      font-family: monospace;
+      font-size: 12px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    code {
+      background: #f4f4f4;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+    .section {
+      margin: 20px 0;
+      border-radius: 5px;
+    }
+    .section h3 {
+      margin-top: 0;
+      color: #555;
+    }
+    button {
+      background: #0066cc;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      margin: 10px 10px 0 0;
+    }
+    button:hover { background: #0052a3; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>WebNN Text Encoder - Static</h1>
+
+    <div class="section">
+      <h3>Input Text:</h3>
+      <textarea id="promptInput" rows="5" style="width: 100%;  font-family: 'Segoe UI', sans-serif; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights.</textarea>
+      <button id="loadBtn">Load Model</button>
+      <button id="runInferenceBtn" disabled>Run Text Encoding</button>
+    </div>
+
+    <div id="status" class="status">
+      Click "Load Model" to start.
+    </div>
+
+    <div id="debugOutput" class="debug-section" style="display:none;">
+      <h3>Debug Information:</h3>
+      <pre id="debugText"></pre>
+    </div>
+  </div>
+
+  <script type="module">
+    import { WeightsFile, buildGraph } from './text_encoder.js';
+    import { AutoTokenizer, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+
+    // Force local-only model loading (transformers library from CDN, but models from local)
+    env.allowLocalModels = true;
+    env.allowRemoteModels = false;  // Critical: prevent downloading models from HF
+    env.useBrowserCache = false;
+    env.localModelPath = './';  // Use current directory for tokenizer
+
+    const statusEl = document.getElementById('status');
+    const debugOutputEl = document.getElementById('debugOutput');
+    const debugTextEl = document.getElementById('debugText');
+
+    let mlContext = null;
+    let mlGraph = null;
+    let weights = null;
+    let tokenizer = null;
+
+    function logProgress(message, isError = false) {
+      const timestamp = new Date().toLocaleTimeString();
+      const prefix = isError ? '✗' : '✓';
+      debugTextEl.textContent += `[${timestamp}] ${prefix} ${message}\n`;
+      debugOutputEl.style.display = 'block';
+      console.log(message);
+    }
+
+    function logDebug(message) {
+      const timestamp = new Date().toLocaleTimeString();
+      debugTextEl.textContent += `[${timestamp}] ${message}\n`;
+      debugOutputEl.style.display = 'block';
+      console.log(message);
+    }
+
+    // Check WebNN support
+    async function checkWebNN() {
+      if (!('ml' in navigator)) {
+        statusEl.className = 'status error';
+        statusEl.textContent = 'WebNN API not supported.';
+        logProgress('WebNN API not available', true);
+        return false;
+      }
+
+      try {
+        mlContext = await navigator.ml.createContext();
+        statusEl.className = 'status success';
+        statusEl.textContent = 'WebNN is ready!';
+        logProgress('WebNN context created successfully');
+        logDebug(`WebNN context type: ${mlContext.constructor.name}`);
+        return true;
+      } catch (e) {
+        statusEl.className = 'status error';
+        statusEl.textContent = `WebNN initialization failed: ${e.message}`;
+        logProgress(`WebNN initialization failed: ${e.message}`, true);
+        logDebug(`Error: ${e.stack}`);
+        return false;
+      }
+    }
+
+    // Load tokenizer
+    async function loadTokenizer() {
+      try {
+        statusEl.className = 'status loading';
+        statusEl.textContent = 'Loading tokenizer...';
+        logProgress('Loading AutoTokenizer...');
+        tokenizer = await AutoTokenizer.from_pretrained('./tokenizer');
+        logProgress('Tokenizer loaded successfully');
+        statusEl.className = 'status success';
+        statusEl.textContent = '✓ Tokenizer ready!';
+      } catch (e) {
+        statusEl.className = 'status error';
+        statusEl.textContent = `Tokenizer loading failed: ${e.message}`;
+        logProgress(`Tokenizer failed: ${e.message}`, true);
+        logDebug(`Error: ${e.stack}`);
+        console.error('Tokenizer error:', e);
+      }
+    }
+
+    // Load model weights and manifest (supports chunked weights)
+    async function loadModel() {
+      statusEl.className = 'status loading';
+      statusEl.textContent = 'Loading model weights...';
+      logProgress('Starting to load weights file...');
+      
+      try {
+        const weightsStartTime = performance.now();
+        
+        // Load manifest
+        logProgress('Loading manifest...');
+        const manifestResponse = await fetch('./webnn-graph-inference-0.chunked.manifest.json');
+        if (!manifestResponse.ok) {
+          throw new Error(`Failed to load manifest: ${manifestResponse.statusText}`);
+        }
+        const manifest = await manifestResponse.json();
+        logDebug(`Manifest loaded: ${Object.keys(manifest.tensors).length} tensors`);
+        
+        // Check if chunks are enabled
+        let buffer;
+        if (manifest.chunks && manifest.chunks.enabled) {
+          // Load chunked weights
+          const numChunks = manifest.chunks.numChunks;
+          const chunkSize = manifest.chunks.chunkSize;
+          logProgress(`Loading ${numChunks} weight chunks (${(chunkSize / (1024**3)).toFixed(2)}GB each)...`);
+          
+          const chunks = [];
+          let totalBytes = 0;
+          
+          for (let i = 0; i < numChunks; i++) {
+            const chunkFile = manifest.chunks.files[i];
+            logProgress(`Loading chunk ${i + 1}/${numChunks}: ${chunkFile}...`);
+            statusEl.textContent = `Loading weights: chunk ${i + 1}/${numChunks}`;
+            
+            const chunkResponse = await fetch(`./${chunkFile}`);
+            if (!chunkResponse.ok) {
+              throw new Error(`Failed to load chunk ${chunkFile}: ${chunkResponse.statusText}`);
+            }
+            
+            // Each chunk is small enough for arrayBuffer()
+            const chunkBuffer = await chunkResponse.arrayBuffer();
+            chunks.push(chunkBuffer);
+            totalBytes += chunkBuffer.byteLength;
+            
+            logDebug(`Chunk ${i}: ${(chunkBuffer.byteLength / (1024**2)).toFixed(2)} MB`);
+          }
+          
+          logProgress(`All chunks loaded: ${(totalBytes / (1024**3)).toFixed(2)} GB total`);
+          
+          // Create weights object with chunked buffer access
+          weights = {
+            chunks: chunks,
+            chunkSize: chunkSize,
+            totalBytes: totalBytes,
+            manifest: manifest,
+            
+            // Virtual buffer property that returns data across chunks
+            get buffer() {
+              // Return a proxy that handles reads across chunks
+              const self = this;
+              return {
+                // This will be called by buildGraph to slice tensor data
+                slice(start, end) {
+                  const length = end - start;
+                  const result = new Uint8Array(length);
+                  let resultOffset = 0;
+                  let currentPos = start;
+                  
+                  while (currentPos < end) {
+                    // Determine which chunk and offset to read from
+                    const chunkIndex = Math.floor(currentPos / self.chunkSize);
+                    // Calculate offset within the chunk
+                    const offsetInChunk = currentPos % self.chunkSize;
+                    // Get the chunk buffer
+                    const chunk = self.chunks[chunkIndex];
+                    // Calculate how many bytes to read from this chunk
+                    const bytesFromChunk = Math.min(
+                      chunk.byteLength - offsetInChunk,  // Remaining bytes in this chunk
+                      end - currentPos                   // Remaining bytes needed
+                    );
+                    // Copy data from chunk to result
+                    const chunkView = new Uint8Array(chunk, offsetInChunk, bytesFromChunk);
+                    // Concat to result
+                    result.set(chunkView, resultOffset);
+                    
+                    resultOffset += bytesFromChunk;  // Move result offset
+                    currentPos += bytesFromChunk;    // Move current position
+                  }
+                  
+                  return result.buffer;
+                }
+              };
+            },
+            
+            getSlice(name) {
+              const tensor = this.manifest.tensors[name];
+              if (!tensor) {
+                throw new Error(`Tensor not found in manifest: ${name}`);
+              }
+              return tensor;
+            }
+          };
+          
+        } else {
+          // Single file (legacy, will fail for >2GB)
+          logProgress('Loading single weights file...');
+          const weightsResponse = await fetch('./webnn-graph-inference-0.weights');
+          if (!weightsResponse.ok) {
+            throw new Error(`Failed to load weights: ${weightsResponse.statusText}`);
+          }
+          
+          buffer = await weightsResponse.arrayBuffer();
+          
+          weights = {
+            buffer: buffer,
+            manifest: manifest,
+            getSlice(name) {
+              const tensor = this.manifest.tensors[name];
+              if (!tensor) {
+                throw new Error(`Tensor not found in manifest: ${name}`);
+              }
+              return tensor;
+            }
+          };
+        }
+        
+        const weightsEndTime = performance.now();
+        const loadTimeSeconds = ((weightsEndTime - weightsStartTime) / 1000).toFixed(2);
+        
+        logProgress(`Weights loaded in ${loadTimeSeconds}s`);
+        
+        const graphStartTime = performance.now();
+        
+        // Build WebNN graph
+        mlGraph = await buildGraph(mlContext, weights);
+        
+        const graphEndTime = performance.now();
+        const buildTimeSeconds = ((graphEndTime - graphStartTime) / 1000).toFixed(2);
+        
+        logProgress(`Graph compiled in ${buildTimeSeconds}s`);
+        logDebug(`Graph object: ${mlGraph.constructor.name}`);
+        
+        statusEl.className = 'status success';
+        statusEl.textContent = `✓ Model loaded successfully! (Load: ${loadTimeSeconds}s, Build: ${buildTimeSeconds}s)`;
+        
+        logProgress('Model is ready for inference!');
+        
+        // Enable inference button after model is fully loaded
+        document.getElementById('runInferenceBtn').disabled = false;
+        
+      } catch (e) {
+        statusEl.className = 'status error';
+        statusEl.textContent = `Model loading failed: ${e.message}`;
+        logProgress(`Loading failed: ${e.message}`, true);
+        logDebug(`Error stack: ${e.stack}`);
+        console.error('Loading error:', e);
+      }
+    }
+
+    // Run text encoding inference
+    async function runInference() {
+      try {
+        const promptInput = document.getElementById('promptInput').value.trim();
+        if (!promptInput) {
+          throw new Error('Please enter a prompt');
+        }
+        
+        statusEl.className = 'status loading';
+        statusEl.textContent = 'Tokenizing input...';
+        logProgress('Starting tokenization...');
+        
+        logDebug(`Input text: ${promptInput.substring(0, 100)}...`);
+
+        // Tokenize
+        const messages = [
+            { role: 'user', content: promptInput }
+        ];
+        const chatText = tokenizer.apply_chat_template(messages, { 
+            tokenize: false,
+            add_generation_prompt: true,
+            enable_thinking: true,
+        });
+        
+        const encoded = tokenizer.encode(chatText);
+        const inputIds = Array.from(encoded);
+        const attentionMask = new Array(inputIds.length).fill(1);
+        
+        logProgress(`Tokenized: ${inputIds.length} tokens`);
+        logDebug(`Token IDs: [${inputIds.join(', ')}]`);
+        logDebug(`Attention mask: [${attentionMask.join(', ')}]`);
+        
+        // Prepare input tensors for WebNN
+        statusEl.textContent = 'Running text encoder...';
+        const inferenceStart = performance.now();
+        
+        // Create MLTensor inputs
+        const Usage = { WRITE: 4, READ: 2 };
+        
+        const inputIdsTensor = await mlContext.createTensor({
+          dataType: 'int64',
+          shape: [1, inputIds.length],
+          usage: Usage.WRITE,
+          writable: true
+        });
+        mlContext.writeTensor(inputIdsTensor, new BigInt64Array(inputIds.map(id => BigInt(id))));
+        
+        const attentionMaskTensor = await mlContext.createTensor({
+          dataType: 'int64',
+          shape: [1, attentionMask.length],
+          usage: Usage.WRITE,
+          writable: true
+        });
+        mlContext.writeTensor(attentionMaskTensor, new BigInt64Array(attentionMask.map(m => BigInt(m))));
+        
+        // Create output tensor (adjust shape based on your model)
+        const outputTensor = await mlContext.createTensor({
+          dataType: 'float32',
+          shape: [1, inputIds.length, 2560],
+          usage: Usage.READ,
+          readable: true
+        });
+        
+        // Run inference
+        logProgress('Dispatching computation...');
+        mlContext.dispatch(mlGraph, 
+          { 
+            input_ids_845: inputIdsTensor,
+            attention_mask_865: attentionMaskTensor
+          },
+          {
+            encoder_hidden_state_0: outputTensor
+          }
+        );
+        
+        // Read results
+        const outputBuffer = await mlContext.readTensor(outputTensor);
+        const inferenceTime = performance.now() - inferenceStart;
+        
+        const outputData = new Float32Array(outputBuffer);
+        logProgress(`Inference complete in ${inferenceTime.toFixed(0)}ms`);
+        
+        // Display results
+        logDebug(`Output shape: [1, ${inputIds.length}, 2560]`);
+        logDebug(`Output sample: [${Array.from(outputData.slice(0, 10)).map(v => v.toFixed(4)).join(', ')}...]`);
+        statusEl.className = 'status success';
+        statusEl.textContent = 'Text encoder run successfully! (Expected value: -560.129, 3.047, -20.109, ...)';
+        logProgress('Text encoder run successfully!');
+        
+      } catch (e) {
+        statusEl.className = 'status error';
+        statusEl.textContent = `Inference failed: ${e.message}`;
+        logProgress(`Inference failed: ${e.message}`, true);
+        logDebug(`Error: ${e.stack}`);
+        console.error('Inference error:', e);
+      }
+    }
+
+    // Event listeners
+    document.getElementById('loadBtn').addEventListener('click', async () => {
+      try {
+        document.getElementById('loadBtn').disabled = true;
+        const supported = await checkWebNN();
+        if (supported) {
+          await loadTokenizer();
+          await loadModel();
+        }
+      } catch (e) {
+        statusEl.className = 'status error';
+        statusEl.textContent = `Initialization error: ${e.message}`;
+        logProgress(`Initialization error: ${e.message}`, true);
+        logDebug(`Error: ${e.stack}`);
+        document.getElementById('loadBtn').disabled = false;
+      }
+    });
+    
+    document.getElementById('runInferenceBtn').addEventListener('click', runInference);
+  </script>
+</body>
+</html>
