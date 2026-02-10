@@ -8287,14 +8287,9 @@ export async function buildGraph(context, weights, max_sequence_length) {
     env.set("_610", builder.input("webnn_GQA_pre_neq_right_data_range", {dataType: "int32", shape: [sequence_length] }));
   }
   {
-    // const sl = weights.getSlice("_614");
-    // const buf = weights.buffer.slice(sl.byteOffset, sl.byteOffset + sl.byteLength);
-    // env.set("_614", builder.constant({ dataType: "int32", shape: [1] }, buf));
-
-    // This tensor is "value_int_one_constant" which is expanded to shape [batch_size, num_heads, qkv_sequence_length, past_sequence_length].
-    // See WebNN EP gqa_op_builder.cc for details: https://github.com/microsoft/onnxruntime/blob/main/onnxruntime/core/providers/webnn/builders/impl/gqa_op_builder.cc#L472
-    // Because expanding a constant tensor with shape [1] to dynamic shape is not supported in WebNN EP, change it to input to allow dynamic sequence length
-    env.set("_614", builder.input("value_int_one_constant", {dataType: "int32", shape: [1, 1, sequence_length, 1] }));
+    const sl = weights.getSlice("_614");
+    const buf = weights.buffer.slice(sl.byteOffset, sl.byteOffset + sl.byteLength);
+    env.set("_614", builder.constant({ dataType: "int32", shape: [1] }, buf));
   }
   {
     const sl = weights.getSlice("_618");
